@@ -316,20 +316,44 @@ For the final part, you will train an agent on TextCraft-Synth with your asynchr
 uv run python scripts/train_async.py --config configs/p5_textcraft_grpo.yaml
 ```
 
-**Evaluate** your final checkpoint and the base model on both the medium and the hard validation split, with four rollouts per task, against the same deployment. The checkpoint path is the `final_sampler_path` in `runs/p5_textcraft_grpo.checkpoints.json`:
+**Evaluate** the final adapter and the base model on the medium and hard
+validation splits, with four rollouts per task. Read `final_sampler_path` from
+`runs/p5_textcraft_grpo.checkpoints.json` to find the model ID and snapshot name
+(e.g. `tinker://model_abc123/v50`). Download that sampler checkpoint and deploy it:
 
 ```bash
-# fine-tuned model
-uv run python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml \
-    --model-path <final_sampler_path> --k 4
-uv run python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml \
-    --model-path <final_sampler_path> --k 4 --tasks data/textcraft_val_hard.jsonl
+# From the repository root (substitute your model ID and snapshot name):
+mkdir -p runs/p5_adapter
+uv run --extra modal modal volume get scottyrl-textcraft-state \
+    checkpoints/<model-id>/sampler_weights/<snapshot>.tar.gz runs/p5_adapter.tar.gz
+tar -xf runs/p5_adapter.tar.gz -C runs/p5_adapter
 
-# base model (no --model-path)
-uv run python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml --k 4
-uv run python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml --k 4 \
-    --tasks data/textcraft_val_hard.jsonl
+cd skyrl_tinker_modal
+LORA_ADAPTER=../runs/p5_adapter \
+    uv run --extra modal modal deploy serve_evaluation.py
+cd ..
+
+# Copy the URL printed by deploy, for example https://your-workspace--scottyrl-evaluation-serve.us-east.modal.run:
+export EVAL_SERVER=<printed_url>
+
+# Fine-tuned model: medium, then hard
+uv run python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml \
+    --server "$EVAL_SERVER" --model a3 --k 4
+uv run python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml \
+    --server "$EVAL_SERVER" --model a3 --k 4 --tasks data/textcraft_val_hard.jsonl
+
+# Base model: medium, then hard
+uv run python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml \
+    --server "$EVAL_SERVER" --model Qwen/Qwen3.5-4B --k 4
+uv run python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml \
+    --server "$EVAL_SERVER" --model Qwen/Qwen3.5-4B --k 4 --tasks data/textcraft_val_hard.jsonl
+
+# Stop the inference deployment when finished:
+uv run --extra modal modal app stop scottyrl-evaluation
 ```
+
+For other serving options, see the
+[serving guide](skyrl_tinker_modal/README.md#standalone-evaluation-with-vllm).
 
 **Export** your final adapter to Hugging Face so that we can evaluate it ourselves. The script downloads the checkpoint through your `serve_textcraft.py` deployment, so it must be up. If you have already stopped it, redeploy it with the same command and keep `TINKER_BASE_URL` pointing at it; your checkpoints persist on its volume. Exporting right after training saves you that extra spin-up. The first command is a one-time login:
 

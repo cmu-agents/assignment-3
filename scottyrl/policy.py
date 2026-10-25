@@ -277,7 +277,8 @@ class CompletionsServerPolicy(ChatTemplatePolicy):
         if self._client is None:
             headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
             self._client = httpx.AsyncClient(
-                base_url=self.base_url, headers=headers, timeout=self.timeout
+                base_url=self.base_url, headers=headers, timeout=self.timeout,
+                follow_redirects=True,
             )
         return self._client
 

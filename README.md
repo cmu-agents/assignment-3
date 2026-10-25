@@ -108,12 +108,15 @@ uv run python scripts/train_sync.py  --config configs/p41_number_search_grpo_g2.
 uv run python scripts/train_async.py --config configs/p43_number_search_async_stale4_iw.yaml
 uv run python scripts/train_async.py --config configs/p43_number_search_async_stale4_noiw.yaml
 
-# Part 5: asynchronous GRPO on TextCraft-Synth, then evaluate the final checkpoint on both val splits
+# Part 5: asynchronous GRPO on TextCraft-Synth, then download and serve the local adapter (see ASSIGNMENT.md)
 uv run python scripts/train_async.py --config configs/p5_textcraft_grpo.yaml
+
+# Deploy serve_evaluation.py as described in ASSIGNMENT.md, then:
 uv run python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml \
-    --model-path <final_sampler_path> --k 4
+    --server "$EVAL_SERVER" --model a3 --k 4
 uv run python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml \
-    --model-path <final_sampler_path> --k 4 --tasks data/textcraft_val_hard.jsonl
+    --server "$EVAL_SERVER" --model a3 --k 4 --tasks data/textcraft_val_hard.jsonl
+# Repeat both with --model Qwen/Qwen3.5-4B for the base-model results.
 
 # Export the final Part 5 adapter to a public Hugging Face repo (after `hf auth login`)
 uv run python scripts/export_checkpoint.py --run p5_textcraft_grpo
@@ -122,8 +125,9 @@ uv run python scripts/export_checkpoint.py --run p5_textcraft_grpo
 uv run python scripts/package_submission.py
 ```
 
-`<final_sampler_path>` is in `runs/p5_textcraft_grpo.checkpoints.json`;
-omit `--model-path` to evaluate the base model with the same settings.
+`EVAL_SERVER` is the URL printed by `serve_evaluation.py`; see
+[the deployment instructions](skyrl_tinker_modal/README.md#standalone-evaluation-with-vllm).
+This inference-only server loads your saved adapter via vLLM. Use `--model Qwen/Qwen3.5-4B` for the base model.
 Graders cannot read your `tinker://` checkpoints, so the Part 5 adapter is
 submitted as a public Hugging Face repo named
 `<hf-username>/scottyrl-a3-p5_textcraft_grpo`: `scripts/export_checkpoint.py`

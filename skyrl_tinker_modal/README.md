@@ -6,7 +6,8 @@
 |---|---|---|---|
 | `serve_number_search_sync.py` | Part 2 (`p2a`, `p2b`) and Part 4.1 (`p41`) | 2x H100 | colocated: both GPUs train *and* sample |
 | `serve_number_search_async.py` | Part 3 (`p3`) and Part 4.3 (`p43_*`) | 2x H100 | split: 1 trains, 1 samples |
-| `serve_textcraft.py` | Part 5 (`p5`), its evaluation and its export | 4x H100 | split: 1 trains, 3 sample |
+| `serve_textcraft.py` | Part 5 (`p5`) training and checkpoint export | 4x H100 | split: 1 trains, 3 sample |
+| `serve_evaluation.py` | Part 5 exported-adapter and base-model evaluation | 2x H100 | inference only |
 
 The layouts differ because the two trainers use GPUs differently. Synchronous training alternates between sampling and updating, so colocating the two keeps both GPUs busy in both phases (SkyRL puts the sampling engines to sleep during an update and wakes them afterwards). Asynchronous training samples *while* it updates, which a colocated server cannot do, so it needs a GPU for each role. Part 5 is asynchronous too, and TextCraft-Synth episodes are long and spend most of their time sampling, so three of its four GPUs go to the sampler.
 
@@ -65,6 +66,47 @@ uv run modal app stop scottyrl-ns-sync
 Stopping removes the deployment, so run `uv run modal deploy ...` again before your next run. This takes seconds because the image is cached, and the URL stays the same. Your checkpoints live on a volume and are not affected.
 
 The app names are `scottyrl-ns-sync`, `scottyrl-ns-async`, and `scottyrl-textcraft`. You can see what is running, and what it has cost so far, in the Modal dashboard.
+
+## Standalone Evaluation with vLLM
+
+Use `serve_evaluation.py` for Part 5 evaluation. It serves the base model or the fine-tuned checkpoint on **two H100s**. From this directory, deploy the local adapter downloaded in Part 5:
+
+```bash
+LORA_ADAPTER=../runs/p5_adapter \
+    uv run --extra modal modal deploy serve_evaluation.py
+```
+
+Pass the printed URL directly to the evaluator's `--server` option.
+Use `--model a3` for the adapter and `--model Qwen/Qwen3.5-4B` for the base
+model. [Part 5](../ASSIGNMENT.md#part-5-textcraft-synth-10-points) lists all
+four required commands. `TINKER_BASE_URL` is not used in `--server` mode, and
+the training deployment can be stopped once the adapter has been downloaded.
+
+The local adapter directory must contain
+`adapter_config.json` and `adapter_model.safetensors`. The launcher uploads
+that directory to the inference container. For a sampler archive downloaded
+from your training volume, extract it with `tar -xf` (SkyRL's `.tar.gz` files
+may be uncompressed tar archives). Use the **sampler** archive, such as
+`sampler_weights/v50.tar.gz`, not a `resume_*.tar.gz` training checkpoint.
+
+An exported Hugging Face adapter repository also works:
+
+```bash
+LORA_ADAPTER=<hf-username>/scottyrl-a3-p5_textcraft_grpo \
+    uv run --extra modal modal deploy serve_evaluation.py
+```
+
+The evaluator supplies temperature, per-turn token limit, stop tokens, and
+prompts using the YAML config. The vLLM launcher sets capacity: 65,000 context
+tokens (matching TextCraft training), up to 64 concurrent sequences per GPU, and LoRA
+rank capacity 32. The default base model is `Qwen/Qwen3.5-4B`; the existing
+`SKYRL_BASE_MODEL` environment override also applies to this launcher.
+
+Stop the evaluation deployment when done:
+
+```bash
+uv run --extra modal modal app stop scottyrl-evaluation
+```
 
 ## Running Parts in Parallel
 

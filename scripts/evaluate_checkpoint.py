@@ -10,20 +10,11 @@ trained with, so evaluation renders prompts exactly like training did. The
 environment and agent come from the config's `train` section. Any field can
 be overridden with `--set`, as in the training scripts.
 
-Where the samples come from, one of:
-  --model-path tinker://...      a Tinker checkpoint (honours TINKER_BASE_URL)
-  --server URL --model NAME      an OpenAI-compatible /v1/completions server
-                                 (vLLM, SGLang) serving NAME
-  neither                        the base model, sampled through Tinker
+Samples come from an OpenAI-compatible completions server (vLLM, SGLang).
+Pass its URL with --server and the served model name with --model. A trailing
+/v1 is added automatically if needed.
 
 Examples:
-  python scripts/evaluate_checkpoint.py --config configs/p2b_number_search_grpo.yaml \\
-      --model-path tinker://... --k 4
-  python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml \\
-      --tasks data/textcraft_val_hard.jsonl --k 8 --model-path tinker://...
-  python scripts/evaluate_checkpoint.py --config configs/p5_textcraft_grpo.yaml \\
-      --set model.enable_thinking=false      # base model, thinking off
-
   # An adapter exported with scripts/export_checkpoint.py, served by vLLM:
   vllm serve Qwen/Qwen3.5-4B --enable-lora --max-lora-rank 32 \\
       --lora-modules a3=<hf_model_id>
@@ -50,8 +41,7 @@ from scottyrl.agents import AGENT_REGISTRY
 from scottyrl.config import load_config
 from scottyrl.envs import make_env_factory
 from scottyrl.evaluate import evaluate_policy
-from scottyrl.policy import CompletionsServerPolicy, TinkerPolicy, load_chat_template
-from scottyrl.tinker_adapter import make_service_client
+from scottyrl.policy import CompletionsServerPolicy, load_chat_template
 from scottyrl.types import load_tasks
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -62,21 +52,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", required=True, help="YAML config (see configs/)")
     p.add_argument("--set", dest="overrides", action="append", default=[],
                    metavar="SECTION.KEY=VALUE", help="override a config field")
-    p.add_argument("--model-path", default=None,
-                   help="tinker checkpoint path; omit (and no --server) for the base model")
-    p.add_argument("--server", default=None, metavar="URL",
-                   help="OpenAI-compatible API root, e.g. http://localhost:8000/v1 (needs --model)")
-    p.add_argument("--model", default=None, metavar="NAME",
-                   help="model (adapter) name the server knows, e.g. a3 (needs --server)")
+    p.add_argument("--server", required=True, metavar="URL",
+                   help="OpenAI-compatible server URL, e.g. http://localhost:8000/v1")
+    p.add_argument("--model", required=True, metavar="NAME",
+                   help="served adapter or base-model name, e.g. a3 or Qwen/Qwen3.5-4B")
     p.add_argument("--tasks", default=None, help="jsonl path; defaults to the env's val split")
     p.add_argument("--k", type=int, default=None, help="rollouts per task (default: train.eval_k)")
     p.add_argument("--num-tasks", type=int, default=None, help="evaluate only the first N tasks")
     p.add_argument("--concurrency", type=int, default=64)
     args = p.parse_args(argv)
-    if args.model_path and args.server:
-        p.error("--model-path and --server are alternatives; give one of them")
-    if bool(args.server) != bool(args.model):
-        p.error("--server and --model go together")
+    args.server = args.server.rstrip("/")
+    if not args.server.endswith("/v1"):
+        args.server += "/v1"
     return args
 
 
@@ -98,15 +85,7 @@ async def main() -> None:
         preserve_thinking_history=model_cfg.preserve_thinking_history,
         stop_sequences=model_cfg.stop_sequences,
     )
-    if args.server:
-        policy = CompletionsServerPolicy(args.server, args.model, tokenizer, **rendering)
-    else:
-        service_client = make_service_client()  # honours TINKER_BASE_URL
-        if args.model_path:
-            sampling_client = service_client.create_sampling_client(model_path=args.model_path)
-        else:
-            sampling_client = service_client.create_sampling_client(base_model=model_cfg.base_model)
-        policy = TinkerPolicy(sampling_client, tokenizer, **rendering)
+    policy = CompletionsServerPolicy(args.server, args.model, tokenizer, **rendering)
 
     tasks = load_tasks(args.tasks or DATA_DIR / f"{train_cfg.env}_val.jsonl")
     if args.num_tasks:
@@ -120,14 +99,9 @@ async def main() -> None:
         concurrency=args.concurrency,
         agent_cls=AGENT_REGISTRY[train_cfg.agent],
     )
-    if args.server:
-        results["model_path"] = None
-        results["server"] = args.server
-        results["model"] = args.model
-    else:
-        results["model_path"] = args.model_path or model_cfg.base_model
-        results["server"] = None
-        results["model"] = None
+    results["model_path"] = None
+    results["server"] = args.server
+    results["model"] = args.model
     print(json.dumps(results, indent=2))
 
 
