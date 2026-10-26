@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 from scottyrl.agents import AGENT_REGISTRY
@@ -59,7 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--tasks", default=None, help="jsonl path; defaults to the env's val split")
     p.add_argument("--k", type=int, default=None, help="rollouts per task (default: train.eval_k)")
     p.add_argument("--num-tasks", type=int, default=None, help="evaluate only the first N tasks")
-    p.add_argument("--concurrency", type=int, default=64)
+    p.add_argument("--concurrency", type=int, default=128)
     args = p.parse_args(argv)
     args.server = args.server.rstrip("/")
     if not args.server.endswith("/v1"):
@@ -90,6 +91,11 @@ async def main() -> None:
     tasks = load_tasks(args.tasks or DATA_DIR / f"{train_cfg.env}_val.jsonl")
     if args.num_tasks:
         tasks = tasks[: args.num_tasks]
+
+    print("Waiting for inference server...", file=sys.stderr)
+    response = await policy._http().get("/models", timeout=1200.0)
+    response.raise_for_status()
+    print("Inference server ready.", file=sys.stderr)
 
     results = await evaluate_policy(
         policy,
