@@ -13,6 +13,7 @@ import pytest
 
 from scottyrl.config import ModelConfig, TrainConfig
 from scottyrl.tinker_adapter import TinkerSession
+import scottyrl.train.sync as sync_module
 from scottyrl.train.async_grpo import AsyncGRPOTrainer, GroupResult
 from scottyrl.train.sync import SyncTrainer
 from scottyrl.types import LLMCall, Task, TokenSequence, Trajectory
@@ -260,6 +261,114 @@ def test_sync_empty_batch_is_a_skipped_step_with_a_record_but_no_update_or_snaps
     assert records[0][1]["train/skipped"] == 1
     assert "train/skipped" not in records[1][1]
     assert records[1][1]["train/loss"] == 0.1
+
+
+# The tests below call the real collect_batch / evaluate_now with
+# collect_group / evaluate_policy replaced by fakes (sync.py looks both up as
+# module globals). They pin contracts whose violations do not raise on a
+# real run.
+
+
+def make_tasks(n, prefix="t"):
+    return [Task(goal=f"g{i}", id=f"{prefix}{i}", max_steps=1) for i in range(n)]
+
+
+def make_sync_trainer_with_tasks(num_tasks=8, **config_overrides):
+    trainer, _, _ = make_sync_trainer(**config_overrides)
+    trainer.train_tasks = make_tasks(num_tasks, prefix="train")
+    trainer.val_tasks = make_tasks(num_tasks, prefix="val")
+    return trainer
+
+
+@pytest.fixture
+def collect_group_calls(monkeypatch):
+    """Replace collect_group with a fake that records its arguments."""
+    recorded = []
+
+    async def fake_collect_group(policy, task, env_factory, group_size, agent_cls=None):
+        recorded.append({"task": task, "group_size": group_size})
+        await asyncio.sleep(0)
+        return [make_trajectory(1.0) for _ in range(group_size)]
+
+    monkeypatch.setattr(sync_module, "collect_group", fake_collect_group)
+    return recorded
+
+
+def test_sync_collect_batch_tasks_are_distinct(collect_group_calls):
+    # With tasks_per_batch equal to the number of tasks, any repeated task
+    # means sampling with replacement; over several seeds that produces a
+    # repeat essentially always.
+    for seed in range(5):
+        collect_group_calls.clear()
+        trainer = make_sync_trainer_with_tasks(num_tasks=6, tasks_per_batch=6, seed=seed)
+        asyncio.run(trainer.collect_batch("policy"))
+        ids = [call["task"].id for call in collect_group_calls]
+        assert len(ids) == 6 and len(set(ids)) == 6, f"seed {seed}: {ids}"
+
+
+def test_sync_collect_batch_is_reproducible_with_group_size(collect_group_calls):
+    # Same seed -> same tasks (draws come from self.rng), and every group
+    # has cfg.group_size rollouts.
+    def sampled(seed):
+        collect_group_calls.clear()
+        trainer = make_sync_trainer_with_tasks(
+            num_tasks=20, tasks_per_batch=4, group_size=3, seed=seed
+        )
+        asyncio.run(trainer.collect_batch("policy"))
+        assert [call["group_size"] for call in collect_group_calls] == [3] * 4
+        return sorted(call["task"].id for call in collect_group_calls)
+
+    assert sampled(1) == sampled(1)
+
+
+def test_sync_collect_batch_runs_groups_concurrently(monkeypatch):
+    # Every fake group waits until all groups have started, so collecting
+    # one task after another never gets past the first group and times out.
+    tasks_per_batch = 4
+    started = 0
+    all_started = None
+
+    async def fake_collect_group(policy, task, env_factory, group_size, agent_cls=None):
+        nonlocal started
+        started += 1
+        if started == tasks_per_batch:
+            all_started.set()
+        await all_started.wait()
+        return [make_trajectory(1.0) for _ in range(group_size)]
+
+    monkeypatch.setattr(sync_module, "collect_group", fake_collect_group)
+    trainer = make_sync_trainer_with_tasks(tasks_per_batch=tasks_per_batch)
+
+    async def run():
+        nonlocal all_started
+        all_started = asyncio.Event()
+        return await asyncio.wait_for(trainer.collect_batch("policy"), timeout=2.0)
+
+    try:
+        groups = asyncio.run(run())
+    except (asyncio.TimeoutError, TimeoutError):
+        pytest.fail(
+            f"only {started}/{tasks_per_batch} groups started before the first "
+            "finished: collect_batch is not running groups concurrently"
+        )
+    assert len(groups) == tasks_per_batch
+
+
+def test_sync_evaluate_now_uses_first_eval_tasks_val_tasks_and_eval_k(monkeypatch):
+    recorded = {}
+
+    async def fake_evaluate_policy(policy, tasks, env_factory, k=1, **kwargs):
+        recorded.update(policy=policy, tasks=list(tasks), k=k)
+        return {"success_rate": 0.5}
+
+    monkeypatch.setattr(sync_module, "evaluate_policy", fake_evaluate_policy)
+    trainer = make_sync_trainer_with_tasks(num_tasks=8, eval_tasks=3, eval_k=5, group_size=2)
+    metrics = asyncio.run(trainer.evaluate_now("the-policy"))
+
+    assert recorded["policy"] == "the-policy"
+    assert [task.id for task in recorded["tasks"]] == ["val0", "val1", "val2"]
+    assert recorded["k"] == 5
+    assert metrics == {"success_rate": 0.5}
 
 
 def test_async_groups_consumed_excludes_stale_dequeues():
