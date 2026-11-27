@@ -208,34 +208,45 @@ class SyncTrainer:
     # ------------------------------------------------------------- driver --
 
     async def train(self) -> None:
-        """Run cfg.num_steps synchronous training steps.
+        """Run cfg.num_steps synchronous training steps, t = 1, ..., cfg.num_steps.
 
-        Requirements:
-          - On-policy: rollouts for a step must come from the weights
-            produced by the previous step's update. Snapshot the initial
-            weights before the first step and refresh the policy after
-            every update, with `self.session.new_sampling_client(name)`
-            wrapped by `self.make_policy(client)`. Names use six decimal
-            digits and follow the step (iteration) index: the initial
-            snapshot is "step_000000" and the snapshot taken after step t's
-            update is "step_{t:06d}". A skipped step produces none, so
-            names can have gaps and are not a count of updates.
-          - A step whose batch has no sequences (every group degenerate)
-            is a skipped step: no update and no new snapshot, so the next
-            step samples from the same policy. It is still recorded.
-          - Each step, skipped or not, is recorded with exactly one call to
-            the given `record_training` helper (pass seqs=[] and train_metrics={} 
-            for a skipped step). 
-          - On every evaluation boundary (when the given
-            `self.eval_due(step)` is true: cfg.eval_every steps apart,
-            counted on absolute step numbers so a resumed run keeps the
-            cadence; 0 disables periodic evaluation), evaluate the CURRENT
-            policy with `evaluate_now` and pass the result to the given
-            `record_evaluation(step, metrics)`. This includes a skipped
-            step: it evaluates the same policy the step sampled from. The
-            step-0 baseline evaluation of the untrained policy is done for
-            you by scripts/train_sync.py before train() is called; you only
-            handle the periodic evaluations.
+        A *weight snapshot* saves a copy of the current weights on the
+        Tinker server and returns a sampling client that serves that frozen
+        copy: `client = await self.session.new_sampling_client(name)`,
+        wrapped by `self.make_policy(client)` to get the policy to sample
+        from. Later updates do not change an existing weight snapshot, and
+        every new_sampling_client call saves a new one, so take exactly the
+        weight snapshots listed below. Weight snapshots are not resumable
+        checkpoints: do not call `save_resumable_state`, which
+        `session.train_step` handles itself.
+
+        Before the loop: take a weight snapshot of the initial weights,
+        named "step_000000". Its policy is the one step 1 samples from.
+
+        Each step t:
+          1. Collect a batch with the current policy (`collect_batch`) and
+             build it (`build_batch`).
+          2. If the batch has sequences: `update` on it, then take a weight
+             snapshot named f"step_{t:06d}" and switch to its policy, so
+             step t+1 samples from the weights this update produced
+             (on-policy).
+             If it has none (every group degenerate), the step is
+             *skipped*: no update and no weight snapshot, so the policy is
+             unchanged and step t+1 samples from it again. Snapshot names
+             can therefore have gaps and are not a count of updates.
+          3. Call the given `record_training` exactly once, skipped or not
+             (pass seqs=[] and train_metrics={} for a skipped step).
+          4. If the given `self.eval_due(t)` is true, `evaluate_now` the
+             current policy, i.e. the one after this step's update (or the
+             unchanged one on a skipped step), and pass the result to the
+             given `record_evaluation(t, metrics)`. `eval_due` counts on
+             absolute step numbers so a resumed run keeps the cadence, and
+             returns False when cfg.eval_every is 0.
+
+        `new_sampling_client`, `collect_batch`, `update` and `evaluate_now`
+        are coroutines; await them. The step-0 baseline evaluation of the
+        untrained policy is done for you by scripts/train_sync.py before
+        train() is called; do not repeat it here.
         """
         # TODO(student): implement this method.
         raise NotImplementedError
